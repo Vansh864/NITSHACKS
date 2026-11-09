@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Search, Loader2 } from 'lucide-react';
 import { initialApps } from './data/appsData';
-import { fetchAppsData, updateAppPermission } from './services/api';
+import { fetchAppsData, updateAppPermission, resetAppsData, simulateApp, applyRecommendationFixes } from './services/api';
 import Navbar from './components/Navbar';
 import RiskSummary from './components/RiskSummary';
 import AppCard from './components/AppCard';
@@ -80,35 +80,50 @@ export default function App() {
   };
 
   // Turn off risky permissions
-  const handleFixRisky = (appId) => {
-    setApps(prev => prev.map(app => {
-      if (app.id !== appId) return app;
-      const updated = app.permissions.map(p => ({
-        ...p,
-        status: p.risk === 'HIGH' ? 'restricted' : p.status
+  const handleFixRisky = async (appId) => {
+    const result = await applyRecommendationFixes(appId);
+    if (!result || !result.app) {
+      setApps(prev => prev.map(app => {
+        if (app.id !== appId) return app;
+        const updated = app.permissions.map(p => ({
+          ...p,
+          status: p.risk === 'HIGH' ? 'restricted' : p.status
+        }));
+
+        const { score, status } = calculateAppHealth(updated);
+        const updatedApp = { ...app, permissions: updated, trustScore: score, status };
+        if (selectedApp && selectedApp.id === appId) setSelectedApp(updatedApp);
+        return updatedApp;
       }));
+      return;
+    }
 
-      const { score, status } = calculateAppHealth(updated);
-
-      const updatedApp = {
-        ...app,
-        permissions: updated,
-        trustScore: score,
-        status: status
-      };
-
-      if (selectedApp && selectedApp.id === appId) {
-        setSelectedApp(updatedApp);
-      }
-
-      return updatedApp;
-    }));
+    const updatedApp = result.app;
+    setApps(prev => prev.map(app => app.id === appId ? updatedApp : app));
+    if (selectedApp && selectedApp.id === appId) {
+      setSelectedApp(updatedApp);
+    }
   };
 
   // Simulate secret contact read + Trigger Alert Banner
-  const handleSimulate = (appId) => {
+  const handleSimulate = async (appId) => {
+    const result = await simulateApp(appId);
     const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const target = apps.find(a => a.id === appId);
+
+    if (result && result.app) {
+      setApps(prev => prev.map(app => app.id === appId ? result.app : app));
+      if (selectedApp && selectedApp.id === appId) {
+        setSelectedApp(result.app);
+      }
+      setCurrentAlert({
+        appId,
+        appName: result.alert?.appName || target?.name || 'App',
+        permissionName: result.alert?.permissionName || 'Contacts',
+        message: result.alert?.message || 'The app attempted to read 35 private phone numbers from your address book without active user consent.'
+      });
+      return;
+    }
 
     setApps(prev => prev.map(app => {
       if (app.id !== appId) return app;
@@ -165,7 +180,13 @@ export default function App() {
         onDismiss={() => setCurrentAlert(null)}
       />
 
-      <Navbar onReset={() => { setApps(initialApps); setSelectedApp(null); setCurrentAlert(null); }} />
+      <Navbar onReset={async () => {
+        await resetAppsData();
+        const data = await fetchAppsData();
+        setApps(data || initialApps);
+        setSelectedApp(null);
+        setCurrentAlert(null);
+      }} />
 
       <main className="max-w-6xl mx-auto p-6 md:p-8">
         {loading ? (
