@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
-import { Search } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Search, Loader2 } from 'lucide-react';
 import { initialApps } from './data/appsData';
+import { fetchAppsData, updateAppPermission } from './services/api';
 import Navbar from './components/Navbar';
 import RiskSummary from './components/RiskSummary';
 import AppCard from './components/AppCard';
@@ -8,25 +9,32 @@ import AppDetail from './components/AppDetail';
 import AlertToast from './components/AlertToast';
 
 export default function App() {
-  const [apps, setApps] = useState(initialApps);
+  const [apps, setApps] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [selectedApp, setSelectedApp] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeZone, setActiveZone] = useState('ALL');
   const [currentAlert, setCurrentAlert] = useState(null);
 
-  // Toggle permission
- // Calculate dynamic trust score and status based on active permissions
-  const calculateAppHealth = (app, updatedPermissions) => {
-    const totalPerms = updatedPermissions.length;
+  // Initial load from backend (or fallback to local mock data)
+  useEffect(() => {
+    fetchAppsData().then((data) => {
+      setApps(data || initialApps);
+      setLoading(false);
+    });
+  }, []);
+
+  // Calculate dynamic trust score and status based on active permissions
+  const calculateAppHealth = (updatedPermissions) => {
     const allowedPerms = updatedPermissions.filter(p => p.status === 'allowed');
     const allowedRisky = allowedPerms.filter(p => p.risk === 'HIGH');
 
-    // If user blocked every permission, app cannot access any data -> Safe!
+    // If user blocked every permission, app cannot access any data -> 100% Safe!
     if (allowedPerms.length === 0) {
       return { score: 100, status: 'Safe' };
     }
 
-    // Dynamic penalty formula
+    // Dynamic heuristic calculation
     let score = 100 - (allowedRisky.length * 25) - ((allowedPerms.length - allowedRisky.length) * 5);
     score = Math.max(score, 20);
 
@@ -37,17 +45,24 @@ export default function App() {
     return { score, status };
   };
 
-  // Toggle permission with live dynamic score & status update
+  // Toggle permission with live dynamic score & status recalculation + API sync
   const handleTogglePermission = (appId, permName) => {
+    const currentTarget = apps.find(a => a.id === appId);
+    const existingPerm = currentTarget?.permissions.find(p => p.name === permName);
+    const nextStatus = existingPerm?.status === 'allowed' ? 'restricted' : 'allowed';
+
+    // Sync with backend API in background
+    updateAppPermission(appId, permName, nextStatus);
+
     setApps(prev => prev.map(app => {
       if (app.id !== appId) return app;
-      
+
       const updatedPermissions = app.permissions.map(p => {
         if (p.name !== permName) return p;
-        return { ...p, status: p.status === 'allowed' ? 'restricted' : 'allowed' };
+        return { ...p, status: nextStatus };
       });
 
-      const { score, status } = calculateAppHealth(app, updatedPermissions);
+      const { score, status } = calculateAppHealth(updatedPermissions);
 
       const updatedApp = {
         ...app,
@@ -56,7 +71,6 @@ export default function App() {
         status: status
       };
 
-      // Also update selectedApp if we are inside detail view
       if (selectedApp && selectedApp.id === appId) {
         setSelectedApp(updatedApp);
       }
@@ -73,25 +87,22 @@ export default function App() {
         ...p,
         status: p.risk === 'HIGH' ? 'restricted' : p.status
       }));
-      return { 
-        ...app, 
-        permissions: updated, 
-        trustScore: Math.min(app.trustScore + 25, 100), 
-        status: 'Caution' 
-      };
-    }));
 
-    if (selectedApp && selectedApp.id === appId) {
-      setSelectedApp(prev => ({
-        ...prev,
-        trustScore: Math.min(prev.trustScore + 25, 100),
-        status: 'Caution',
-        permissions: prev.permissions.map(p => ({
-          ...p,
-          status: p.risk === 'HIGH' ? 'restricted' : p.status
-        }))
-      }));
-    }
+      const { score, status } = calculateAppHealth(updated);
+
+      const updatedApp = {
+        ...app,
+        permissions: updated,
+        trustScore: score,
+        status: status
+      };
+
+      if (selectedApp && selectedApp.id === appId) {
+        setSelectedApp(updatedApp);
+      }
+
+      return updatedApp;
+    }));
   };
 
   // Simulate secret contact read + Trigger Alert Banner
@@ -102,7 +113,7 @@ export default function App() {
     setApps(prev => prev.map(app => {
       if (app.id !== appId) return app;
       const newScore = Math.max(app.trustScore - 30, 20);
-      return {
+      const updatedApp = {
         ...app,
         trustScore: newScore,
         status: 'Dangerous',
@@ -111,40 +122,25 @@ export default function App() {
           ...app.timeline
         ]
       };
+
+      if (selectedApp && selectedApp.id === appId) {
+        setSelectedApp(updatedApp);
+      }
+
+      return updatedApp;
     }));
 
-    if (selectedApp && selectedApp.id === appId) {
-      setSelectedApp(prev => ({
-        ...prev,
-        trustScore: Math.max(prev.trustScore - 30, 20),
-        status: 'Dangerous',
-        timeline: [
-          { time, event: 'Alert: App unexpectedly read your contacts in the background!', severity: 'HIGH' },
-          ...prev.timeline
-        ]
-      }));
-    }
-
-    // Trigger Toast Notification
     setCurrentAlert({
       appId,
-      appName: target.name,
+      appName: target?.name || 'App',
       permissionName: 'Contacts',
-      message: `The app attempted to read 35 private phone numbers from your address book without active user consent.`
+      message: 'The app attempted to read 35 private phone numbers from your address book without active user consent.'
     });
   };
 
   // Block from Toast
   const handleBlockFromToast = (appId, permName) => {
     handleTogglePermission(appId, permName);
-    setApps(prev => prev.map(app => {
-      if (app.id !== appId) return app;
-      return {
-        ...app,
-        trustScore: Math.min(app.trustScore + 15, 100),
-        status: 'Caution'
-      };
-    }));
     setCurrentAlert(null);
   };
 
@@ -163,7 +159,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans antialiased">
-      {/* Real-time Alert Toast */}
       <AlertToast 
         alert={currentAlert}
         onBlock={handleBlockFromToast}
@@ -173,7 +168,12 @@ export default function App() {
       <Navbar onReset={() => { setApps(initialApps); setSelectedApp(null); setCurrentAlert(null); }} />
 
       <main className="max-w-6xl mx-auto p-6 md:p-8">
-        {selectedApp ? (
+        {loading ? (
+          <div className="flex flex-col items-center justify-center min-h-[50vh] gap-3 text-slate-500">
+            <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+            <p className="text-sm font-medium">Scanning device applications & permissions...</p>
+          </div>
+        ) : selectedApp ? (
           <AppDetail 
             app={selectedApp}
             onBack={() => setSelectedApp(null)}
@@ -203,7 +203,7 @@ export default function App() {
                 <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input 
                   type="text"
-                  placeholder="Search by app name or type..."
+                  placeholder="Search by app name or category..."
                   value={searchQuery}
                   onChange={e => setSearchQuery(e.target.value)}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-4 py-2 text-xs text-slate-800 outline-none focus:border-blue-500 transition"
@@ -213,7 +213,7 @@ export default function App() {
               <div className="flex items-center gap-2 w-full sm:w-auto">
                 <span className="text-xs text-slate-400 font-medium mr-1">Filter:</span>
                 {[
-                  { id: 'ALL', label: 'All (10)' },
+                  { id: 'ALL', label: `All (${apps.length})` },
                   { id: 'RISKY', label: 'Risky' },
                   { id: 'CAUTION', label: 'Caution' },
                   { id: 'SAFE', label: 'Safe' }
